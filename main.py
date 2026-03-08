@@ -2,40 +2,59 @@ import time
 import random
 import numpy as np
 import sys
+from collections import deque, Counter
 
 # ==============================================================================
-# MOCK MODULES (For Standalone Testing)
-# In production, these would be imported from your 'src/' directory:
-# from src.diagnostic.feature_extractor import DynacardAnalytics
-# from src.diagnostic.evaluator import WellMonitor
-# from src.prescriptive.physics_solver import SRPPhysicsEngine
+# MOCK MODULES (For Standalone Testing in Colab/Terminal)
+# In a real production environment, these would be imported from the 'src/' directory.
 # ==============================================================================
 
 class MockDynacardAnalytics:
     @staticmethod
     def calculate_fluid_pound_severity(position, load):
-        # Simulates calculating empty pump volume percentage (0-100%)
-        return random.uniform(20.0, 45.0)
+        # Simulates calculating the empty pump volume percentage
+        return random.uniform(25.0, 40.0)
 
 class MockWellMonitor:
-    def __init__(self, well_id):
+    def __init__(self, well_id, window_size=10):
         self.well_id = well_id
-        self.stroke_count = 0
-        
+        self.window_size = window_size
+        self.stroke_history = deque(maxlen=window_size)
+        self.active_alarm = None
+
     def process_new_stroke(self, pred_class, severity=0.0):
-        self.stroke_count += 1
-        # Force a fluid pound alarm on the 5th stroke for testing purposes
-        if self.stroke_count == 5:
-            return {
-                "level": "WARNING",
-                "type": "FLUID_POUND",
-                "severity_pct": severity,
-                "message": f"[WARNING] Well {self.well_id}: Chronic Fluid Pound detected. Avg Severity: {severity:.1f}%"
-            }
+        self.stroke_history.append((pred_class, severity))
+
+        # Only evaluate once the window is full
+        if len(self.stroke_history) == self.window_size:
+            classes = [item[0] for item in self.stroke_history]
+            counts = Counter(classes)
+            pound_pct = (counts['fluid_pound'] / self.window_size) * 100.0
+
+            if pound_pct >= 70.0:
+                if self.active_alarm != 'FLUID_POUND':
+                    self.active_alarm = 'FLUID_POUND'
+                    pound_severities = [item[1] for item in self.stroke_history if item[0] == 'fluid_pound']
+                    avg_severity = np.mean(pound_severities) if pound_severities else 0.0
+                    return {
+                        "level": "WARNING",
+                        "type": "FLUID_POUND",
+                        "severity_pct": avg_severity,
+                        "message": f"[WARNING] Well {self.well_id}: Chronic Fluid Pound detected. Avg Severity: {avg_severity:.1f}%"
+                    }
+            else:
+                if self.active_alarm == 'FLUID_POUND':
+                    self.active_alarm = None
+                    return {
+                        "level": "INFO",
+                        "type": "NORMAL",
+                        "message": f"\n[INFO] Well {self.well_id}: Conditions normalized. Alarms cleared."
+                    }
         return None
-        
+
     def reset_history(self):
-        self.stroke_count = 0
+        self.stroke_history.clear()
+        self.active_alarm = None
 
 class MockSRPPhysicsEngine:
     def __init__(self, well_id):
@@ -53,11 +72,28 @@ class MockSRPPhysicsEngine:
         return max(new_spm, 3.0) # Ensure SPM doesn't drop below motor minimum
 
 class MockMLModel:
+    def __init__(self):
+        self.stroke_count = 0
+        
     def predict(self, position, load):
-        return 'fluid_pound'
+        self.stroke_count += 1
+        
+        # Real-world dynamic scenario simulation:
+        # Phase 1: Well starts normal
+        if self.stroke_count < 15:
+            return 'normal'
+        # Phase 2: Inflow drops, fluid pound starts
+        elif 15 <= self.stroke_count < 40:
+            return 'fluid_pound'
+        # Phase 3: Post-intervention recovery (simulate the well healing)
+        else:
+            if random.random() < 0.85:
+                return 'normal'
+            else:
+                return 'fluid_pound'
 
 def generate_mock_telemetry():
-    """Simulates incoming sensor data from the edge device."""
+    """Simulates incoming high-frequency sensor data."""
     return {'position': np.array([0, 0.5, 1.0, 0.5, 0]), 'load': np.array([0, 1.0, 1.0, 0.2, 0])}
 
 # ==============================================================================
@@ -72,32 +108,27 @@ class SCADAInterface:
     def set_and_verify_spm(self, target_spm):
         print(f"\n[SCADA] Initiating physical intervention for {self.well_id}. Target: {target_spm:.1f} SPM")
         
-        # Phase 1: Network Transmission & Retries
         network_success = False
         for attempt in range(1, self.max_retries + 1):
             try:
                 print(f"   -> Network Write (Attempt {attempt}/{self.max_retries})...", end=" ")
-                time.sleep(0.5) # Simulate latency
-                
-                # 15% chance of network failure to test robustness
-                if random.random() < 0.15: 
+                time.sleep(0.5) 
+                if random.random() < 0.1: # 10% chance of network failure
                     raise ConnectionError("Packet Loss")
-                    
                 print("SUCCESS")
                 network_success = True
                 break
             except ConnectionError:
                 print("FAILED (Network Timeout)")
-                time.sleep(1) # Backoff
+                time.sleep(1) 
                 
         if not network_success:
             print("[SCADA FATAL] Lost communication with VFD controller.")
             return False
 
-        # Phase 2: Physical Verification (Motor Inertia Simulation)
         print("   -> Verifying motor mechanical response...")
         for i in range(3): 
-            time.sleep(1)
+            time.sleep(0.8)
             print(f"      ... Waiting for motor RPM to stabilize ({(i+1)*33}%)", end="\r")
         
         print(f"\n   -> [SCADA VERIFIED] Motor stabilized at {target_spm:.1f} SPM.")
@@ -116,37 +147,30 @@ def main():
     print(" SRP AUTONOMOUS CONTROL EDGE-SERVER INITIALIZED")
     print("==========================================================\n")
     
-    # 1. Pipeline Initialization
     WELL_ID = "BETA-07"
     current_spm = 10.0
     
-    # Instantiate modules
-    monitor = MockWellMonitor(well_id=WELL_ID)
+    monitor = MockWellMonitor(well_id=WELL_ID, window_size=10)
     physics_engine = MockSRPPhysicsEngine(well_id=WELL_ID)
     scada = SCADAInterface(well_id=WELL_ID)
     ml_model = MockMLModel()
     
-    # Control Dynamics & Safety Parameters
     in_cooldown = False
     cooldown_strokes_remaining = 0
-    COOLDOWN_PERIOD = 8
+    COOLDOWN_PERIOD = 12
     MAX_SPM_DROP_STEP = 1.5 
     is_system_healthy = True 
+    stroke_counter = 0
     
     print(f"[{WELL_ID}] Pipeline Active. Current SPM: {current_spm}")
     print(f"[{WELL_ID}] Listening to high-frequency telemetry stream...\n")
     
-    stroke_counter = 0
-    
     try:
-        # The Infinite Loop (Edge Computing Paradigm)
-        while is_system_healthy:
+        while is_system_healthy and stroke_counter < 80: # Capped at 80 for Colab testing
             stroke_counter += 1
-            
-            # A. Ingest Data
             telemetry = generate_mock_telemetry()
             
-            # B. Control Dynamics: Dead Time Evaluation
+            # Control Dynamics: Dead Time Evaluation
             if in_cooldown:
                 cooldown_strokes_remaining -= 1
                 sys.stdout.write(f"\rStroke {stroke_counter:04d} | [SYSTEM] Cooldown active. Equalizing annulus fluid ({cooldown_strokes_remaining} strokes left)...")
@@ -155,10 +179,10 @@ def main():
                 if cooldown_strokes_remaining <= 0:
                     print(f"\n\n[SYSTEM] Cooldown complete. Resuming active diagnostic monitoring.")
                     in_cooldown = False
-                time.sleep(0.5)
+                time.sleep(0.2)
                 continue 
                 
-            # C. Diagnostic Stage
+            # Diagnostic Stage
             pred_class = ml_model.predict(telemetry['position'], telemetry['load'])
             sys.stdout.write(f"\rStroke {stroke_counter:04d} | ML Class: {pred_class.upper().ljust(15)}")
             sys.stdout.flush()
@@ -169,50 +193,49 @@ def main():
                 
             alarm = monitor.process_new_stroke(pred_class, severity=stroke_severity)
             
-            # D. Prescriptive Stage & Execution
+            # Prescriptive Stage & Execution
             if alarm:
-                print(f"\n\n{alarm['message']}")
-                
-                if alarm['type'] == 'ROD_PARTED':
-                    scada.emergency_shutdown()
-                    is_system_healthy = False 
-                    break 
+                # If the alarm is an INFO (meaning conditions normalized), just print it.
+                if alarm['level'] == 'INFO':
+                    print(f"{alarm['message']}")
+                else:
+                    print(f"\n\n{alarm['message']}")
                     
-                elif alarm['type'] == 'FLUID_POUND':
-                    severity = alarm['severity_pct']
-                    print(f"[ENGINEERING] Calculating dynamic mitigation strategy...")
-                    
-                    target_spm = physics_engine.calculate_optimal_spm(current_spm, severity)
-                    
-                    # Apply Damped Stepwise Control to protect IPR
-                    if (current_spm - target_spm) > MAX_SPM_DROP_STEP:
-                        recommended_spm = current_spm - MAX_SPM_DROP_STEP
-                        print(f" > Warning: Target drop is too aggressive. Applying damped step of max {MAX_SPM_DROP_STEP} SPM.")
-                    else:
-                        recommended_spm = target_spm
-                    
-                    print(f" > Current Capacity ({current_spm:.1f} SPM) : {physics_engine.calculate_pump_displacement(current_spm):.1f} BPD")
-                    print(f" > Target Capacity  ({target_spm:.1f} SPM) : {physics_engine.calculate_pump_displacement(target_spm):.1f} BPD")
-                    print(f" > Executing Step   ({recommended_spm:.1f} SPM) : {physics_engine.calculate_pump_displacement(recommended_spm):.1f} BPD")
-                    
-                    # E. The Fail-Safe SCADA Handshake
-                    action_success = scada.set_and_verify_spm(recommended_spm)
-                    
-                    if action_success:
-                        # State is ONLY updated if physical verification passes
-                        current_spm = recommended_spm
-                        in_cooldown = True
-                        cooldown_strokes_remaining = COOLDOWN_PERIOD
-                        monitor.reset_history() 
-                    else:
-                        # ENGINEERING DECISION: SCADA failed during a severe fluid pound.
-                        # Do not let the well destroy itself. Trigger emergency shutdown.
-                        print(f"\n[SYSTEM FATAL] Cannot mitigate fluid pound due to SCADA failure!")
+                    if alarm['type'] == 'ROD_PARTED':
                         scada.emergency_shutdown()
-                        is_system_healthy = False # Breaks the loop
+                        is_system_healthy = False 
+                        break 
+                        
+                    elif alarm['type'] == 'FLUID_POUND':
+                        print(f"[ENGINEERING] Calculating dynamic mitigation strategy...")
+                        target_spm = physics_engine.calculate_optimal_spm(current_spm, alarm['severity_pct'])
+                        
+                        if (current_spm - target_spm) > MAX_SPM_DROP_STEP:
+                            recommended_spm = current_spm - MAX_SPM_DROP_STEP
+                            print(f" > Warning: Target drop is too aggressive. Applying damped step of max {MAX_SPM_DROP_STEP} SPM.")
+                        else:
+                            recommended_spm = target_spm
+                        
+                        print(f" > Current Capacity ({current_spm:.1f} SPM) : {physics_engine.calculate_pump_displacement(current_spm):.1f} BPD")
+                        print(f" > Target Capacity  ({target_spm:.1f} SPM) : {physics_engine.calculate_pump_displacement(target_spm):.1f} BPD")
+                        print(f" > Executing Step   ({recommended_spm:.1f} SPM) : {physics_engine.calculate_pump_displacement(recommended_spm):.1f} BPD")
+                        
+                        action_success = scada.set_and_verify_spm(recommended_spm)
+                        
+                        if action_success:
+                            current_spm = recommended_spm
+                            in_cooldown = True
+                            cooldown_strokes_remaining = COOLDOWN_PERIOD
+                            monitor.reset_history() 
+                        else:
+                            print(f"\n[SYSTEM FATAL] Cannot mitigate fluid pound due to SCADA failure!")
+                            scada.emergency_shutdown()
+                            is_system_healthy = False
             
-            time.sleep(0.5) # Simulate time gap between physical strokes
+            time.sleep(0.2) # Sleep for visual pacing in terminal
             
+        print("\n\n[SYSTEM] Simulation ended.")
+
     except KeyboardInterrupt:
         print("\n\n[SYSTEM] Manual interruption received. Shutting down pipeline gracefully.")
 
