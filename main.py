@@ -2,16 +2,17 @@ import time
 import random
 import numpy as np
 import sys
-import csv  # Added for data logging
+import csv
+import threading
 
 # ==============================================================================
-# MOCK MODULES (For Standalone Testing in Colab/Terminal)
+# MOCK MODULES (For Standalone Testing / Portfolio Demonstration)
 # ==============================================================================
 
 class MockDynacardAnalytics:
     @staticmethod
     def calculate_fluid_pound_severity(position, load):
-        # Simulates calculating the empty pump volume percentage
+        """Simulates the analytical calculation of empty pump volume (%)."""
         return random.uniform(25.0, 40.0)
 
 class MockWellMonitor:
@@ -22,11 +23,12 @@ class MockWellMonitor:
         self.active_alarm = None
 
     def process_new_stroke(self, pred_class, severity=0.0):
+        """Processes stroke classifications and prevents alarm fatigue."""
         self.stroke_history.append((pred_class, severity))
         if len(self.stroke_history) > self.window_size:
             self.stroke_history.pop(0)
 
-        # Only evaluate once the window is full
+        # Only evaluate once the moving window is full
         if len(self.stroke_history) == self.window_size:
             classes = [item[0] for item in self.stroke_history]
             pound_count = classes.count('fluid_pound')
@@ -64,22 +66,25 @@ class MockSRPPhysicsEngine:
         self.D = 1.25 # Pump Diameter (inches)
 
     def calculate_pump_displacement(self, spm):
+        """Calculates theoretical Pump Displacement in Barrels Per Day (BPD)."""
         return self.constant * spm * self.S * (self.D ** 2)
 
     def calculate_optimal_spm(self, current_spm, severity_pct):
+        """Calculates required SPM reduction based on volumetric severity."""
         current_pd = self.calculate_pump_displacement(current_spm)
         target_pd = current_pd * (1.0 - (severity_pct / 100.0))
         new_spm = target_pd / (self.constant * self.S * (self.D ** 2))
-        return max(new_spm, 3.0) # Ensure SPM doesn't drop below motor minimum
+        return max(new_spm, 3.0) # Hardware Safety: Motor cannot drop below 3.0 SPM
 
 class MockMLModel:
     def __init__(self):
         self.stroke_count = 0
         
     def predict(self, position, load):
+        """Simulates the Random Forest classification output over time."""
         self.stroke_count += 1
         
-        # Real-world dynamic scenario simulation
+        # Real-world dynamic scenario: Normal -> Pound -> Recovery
         if self.stroke_count < 15:
             return 'normal'
         elif 15 <= self.stroke_count < 40:
@@ -91,7 +96,7 @@ class MockMLModel:
                 return 'fluid_pound'
 
 def generate_mock_telemetry():
-    """Simulates incoming high-frequency sensor data."""
+    """Simulates high-frequency raw edge sensor data."""
     return {'position': np.array([0, 0.5, 1.0, 0.5, 0]), 'load': np.array([0, 1.0, 1.0, 0.2, 0])}
 
 # ==============================================================================
@@ -104,6 +109,7 @@ class SCADAInterface:
         self.physical_timeout = physical_timeout
 
     def set_and_verify_spm(self, target_spm):
+        """Executes a two-way handshake to ensure physical motor compliance."""
         print(f"\n[SCADA] Initiating physical intervention for {self.well_id}. Target: {target_spm:.1f} SPM")
         
         network_success = False
@@ -111,7 +117,7 @@ class SCADAInterface:
             try:
                 print(f"   -> Network Write (Attempt {attempt}/{self.max_retries})...", end=" ")
                 time.sleep(0.5) 
-                if random.random() < 0.1: # 10% chance of network failure
+                if random.random() < 0.1: # 10% chance of packet loss
                     raise ConnectionError("Packet Loss")
                 print("SUCCESS")
                 network_success = True
@@ -138,6 +144,26 @@ class SCADAInterface:
         print("[SCADA CRITICAL] Motor power cut off. Well is secured.")
 
 # ==============================================================================
+# ASYNCHRONOUS HUMAN-IN-THE-LOOP (Control Room Override)
+# ==============================================================================
+manual_override_triggered = False
+
+def listen_for_operator_override():
+    """
+    Runs in a daemon background thread. Listens for human emergency input 
+    without blocking the high-frequency telemetry reading loop.
+    """
+    global manual_override_triggered
+    while True:
+        try:
+            command = input()
+            if command.strip().upper() == 'STOP':
+                manual_override_triggered = True
+                break
+        except EOFError:
+            break
+
+# ==============================================================================
 # MAIN ORCHESTRATOR PIPELINE
 # ==============================================================================
 def main():
@@ -148,11 +174,13 @@ def main():
     WELL_ID = "BETA-07"
     current_spm = 10.0
     
+    # Instantiate modules
     monitor = MockWellMonitor(well_id=WELL_ID, window_size=10)
     physics_engine = MockSRPPhysicsEngine(well_id=WELL_ID)
     scada = SCADAInterface(well_id=WELL_ID)
     ml_model = MockMLModel()
     
+    # Control Dynamics Parameters
     in_cooldown = False
     cooldown_strokes_remaining = 0
     COOLDOWN_PERIOD = 12
@@ -161,7 +189,7 @@ def main():
     stroke_counter = 0
     
     # --------------------------------------------------------------------------
-    # INITIALIZE CSV LOG FILE (Write Headers)
+    # INITIALIZE CSV LOG FILE (For Dashboarding & ROI Proof)
     # --------------------------------------------------------------------------
     log_filename = 'srp_operation_log.csv'
     with open(log_filename, mode='w', newline='') as file:
@@ -170,20 +198,33 @@ def main():
     
     print(f"[{WELL_ID}] Pipeline Active. Current SPM: {current_spm}")
     print(f"[{WELL_ID}] Logging data to {log_filename}")
-    print(f"[{WELL_ID}] Listening to high-frequency telemetry stream...\n")
+    
+    # Start the Asynchronous Listener
+    print(f"[{WELL_ID}] MANUAL OVERRIDE ACTIVE: Type 'STOP' and press Enter at any time to kill the motor.\n")
+    override_thread = threading.Thread(target=listen_for_operator_override, daemon=True)
+    override_thread.start()
     
     try:
+        # The Infinite Edge-Computing Loop
         while is_system_healthy and stroke_counter < 80: 
+            
+            # --- 1. ASYNCHRONOUS SAFETY CHECK ---
+            global manual_override_triggered
+            if manual_override_triggered:
+                print("\n\n[CONTROL ROOM] MANUAL OVERRIDE COMMAND RECEIVED!")
+                scada.emergency_shutdown()
+                is_system_healthy = False
+                break # Instantly halt the automation loop
+                
             stroke_counter += 1
             telemetry = generate_mock_telemetry()
             
-            # 1. Control Dynamics: Dead Time Evaluation
+            # --- 2. CONTROL DYNAMICS: DEAD TIME EVALUATION ---
             if in_cooldown:
                 cooldown_strokes_remaining -= 1
                 sys.stdout.write(f"\rStroke {stroke_counter:04d} | [SYSTEM] Cooldown active. Equalizing annulus fluid ({cooldown_strokes_remaining} strokes left)...")
                 sys.stdout.flush()
                 
-                # Log the cooldown state (severity is nominally 0 during stabilization)
                 with open(log_filename, mode='a', newline='') as file:
                     writer = csv.writer(file)
                     writer.writerow([stroke_counter, current_spm, 0.0])
@@ -194,7 +235,7 @@ def main():
                 time.sleep(0.2)
                 continue 
                 
-            # 2. Diagnostic Stage
+            # --- 3. DIAGNOSTIC STAGE (Machine Learning + Calculus) ---
             pred_class = ml_model.predict(telemetry['position'], telemetry['load'])
             sys.stdout.write(f"\rStroke {stroke_counter:04d} | ML Class: {pred_class.upper().ljust(15)}")
             sys.stdout.flush()
@@ -203,16 +244,13 @@ def main():
             if pred_class == 'fluid_pound':
                 stroke_severity = MockDynacardAnalytics.calculate_fluid_pound_severity(telemetry['position'], telemetry['load'])
                 
-            # ------------------------------------------------------------------
-            # APPEND DATA TO CSV LOG
-            # ------------------------------------------------------------------
             with open(log_filename, mode='a', newline='') as file:
                 writer = csv.writer(file)
                 writer.writerow([stroke_counter, current_spm, stroke_severity])
                 
             alarm = monitor.process_new_stroke(pred_class, severity=stroke_severity)
             
-            # 3. Prescriptive Stage & Execution
+            # --- 4. PRESCRIPTIVE STAGE & SCADA EXECUTION ---
             if alarm:
                 if alarm['level'] == 'INFO':
                     print(f"{alarm['message']}")
@@ -228,6 +266,7 @@ def main():
                         print(f"[ENGINEERING] Calculating dynamic mitigation strategy...")
                         target_spm = physics_engine.calculate_optimal_spm(current_spm, alarm['severity_pct'])
                         
+                        # Apply Damped Stepwise Control to protect Inflow Performance
                         if (current_spm - target_spm) > MAX_SPM_DROP_STEP:
                             recommended_spm = current_spm - MAX_SPM_DROP_STEP
                             print(f" > Warning: Target drop is too aggressive. Applying damped step of max {MAX_SPM_DROP_STEP} SPM.")
@@ -250,12 +289,13 @@ def main():
                             scada.emergency_shutdown()
                             is_system_healthy = False
             
-            time.sleep(0.2) 
+            time.sleep(0.2) # Pacing for visualization
             
-        print("\n\n[SYSTEM] Simulation ended.")
+        if is_system_healthy:
+            print("\n\n[SYSTEM] Simulation ended naturally.")
 
     except KeyboardInterrupt:
-        print("\n\n[SYSTEM] Manual interruption received. Shutting down pipeline gracefully.")
+        print("\n\n[SYSTEM] Manual interruption received via KeyboardInterrupt. Shutting down pipeline gracefully.")
 
 if __name__ == "__main__":
     main()
