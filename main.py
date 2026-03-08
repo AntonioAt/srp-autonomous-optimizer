@@ -74,26 +74,28 @@ class MockSRPPhysicsEngine:
         current_pd = self.calculate_pump_displacement(current_spm)
         target_pd = current_pd * (1.0 - (severity_pct / 100.0))
         new_spm = target_pd / (self.constant * self.S * (self.D ** 2))
-        return max(new_spm, 3.0) # Hardware Safety: Motor cannot drop below 3.0 SPM
+        return max(new_spm, 3.0) # Hardware Safety Constraint: Motor cannot drop below 3.0 SPM
 
 class MockMLModel:
     def __init__(self):
         self.stroke_count = 0
+        # True Randomness: The anomaly will start at an unpredictable time between stroke 10 and 50.
+        self.pound_start_stroke = random.randint(10, 50) 
         
     def predict(self, position, load):
-        """Simulates the Random Forest classification output over time."""
+        """Simulates the Random Forest classification output over time with chaotic behavior."""
         self.stroke_count += 1
         
-        # Real-world dynamic scenario: Normal -> Pound -> Recovery
-        if self.stroke_count < 15:
+        # Phase 1: Normal steady-state operation
+        if self.stroke_count < self.pound_start_stroke:
             return 'normal'
-        elif 15 <= self.stroke_count < 40:
-            return 'fluid_pound'
         else:
-            if random.random() < 0.85:
-                return 'normal'
-            else:
+            # Phase 2: Inflow drops unpredictably (Chaos Theory)
+            # 60% chance of fluid pound, 40% chance of normal stroke
+            if random.random() < 0.60:
                 return 'fluid_pound'
+            else:
+                return 'normal'
 
 def generate_mock_telemetry():
     """Simulates high-frequency raw edge sensor data."""
@@ -205,8 +207,8 @@ def main():
     override_thread.start()
     
     try:
-        # The Infinite Edge-Computing Loop
-        while is_system_healthy and stroke_counter < 80: 
+        # The Infinite Edge-Computing Loop (Capped at 100 strokes for Colab simulation)
+        while is_system_healthy and stroke_counter < 100: 
             
             # --- 1. ASYNCHRONOUS SAFETY CHECK ---
             global manual_override_triggered
@@ -214,7 +216,7 @@ def main():
                 print("\n\n[CONTROL ROOM] MANUAL OVERRIDE COMMAND RECEIVED!")
                 scada.emergency_shutdown()
                 is_system_healthy = False
-                break # Instantly halt the automation loop
+                break 
                 
             stroke_counter += 1
             telemetry = generate_mock_telemetry()
