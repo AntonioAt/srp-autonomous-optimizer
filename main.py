@@ -8,30 +8,63 @@ import json
 import os
 
 # ==============================================================================
-# CONFIGURATION MANAGEMENT (The "User Input" Layer)
+# CONFIGURATION MANAGEMENT (Interactive Setup Wizard)
 # ==============================================================================
 def load_or_create_config(config_file="well_config.json"):
     """
-    Loads well-specific parameters dynamically. If the file doesn't exist,
-    it generates a template. This separates hardware specs from software logic.
+    Loads well-specific parameters. If no memory is found, it triggers an
+    Interactive Setup Wizard to ask the Field Engineer for parameters ONE TIME,
+    then saves it as permanent non-volatile memory.
     """
     if not os.path.exists(config_file):
-        print(f"[SYSTEM] Configuration file '{config_file}' not found. Generating default template...")
-        default_config = {
-            "well_id": "BETA-07",
-            "pump_diameter_inches": 1.25,
-            "stroke_length_inches": 144.0,
-            "initial_spm": 10.0,
-            "motor_minimum_spm": 3.0,
-            "max_spm_drop_step": 1.5,
-            "cooldown_period_strokes": 12,
-            "alarm_threshold_pct": 70.0
+        print("==========================================================")
+        print(" [SYSTEM SETUP] NEW WELL CONFIGURATION DETECTED")
+        print("==========================================================")
+        print("No configuration memory found in Edge Server.")
+        print("Please input the physical parameters for this specific well.\n")
+        
+        # Interactive User Input (with defaults if user just presses Enter)
+        well_id = input("Enter Well ID (default: MINAS-102)          : ") or "MINAS-102"
+        
+        try:
+            pump_dia = input("Enter Pump Diameter (inches, default: 2.25): ")
+            pump_dia = float(pump_dia) if pump_dia else 2.25
+            
+            stroke_len = input("Enter Stroke Length (inches, default: 120): ")
+            stroke_len = float(stroke_len) if stroke_len else 120.0
+            
+            init_spm = input("Enter Initial Motor Speed (SPM, default: 8.5): ")
+            init_spm = float(init_spm) if init_spm else 8.5
+            
+        except ValueError:
+            print("\n[ERROR] Invalid numerical input! Falling back to standard default values.")
+            pump_dia, stroke_len, init_spm = 2.25, 120.0, 8.5
+
+        # Structuring the input into an industrial config template
+        user_config = {
+            "well_id": well_id.upper(),
+            "pump_diameter_inches": pump_dia,
+            "stroke_length_inches": stroke_len,
+            "initial_spm": init_spm,
+            "motor_minimum_spm": 4.0,           # Hardware safety limit
+            "max_spm_drop_step": 1.0,           # Dynamic damping limit
+            "cooldown_period_strokes": 150,     # Annulus recovery delay
+            "alarm_threshold_pct": 80.0         # Alarm fatigue prevention
         }
+        
+        # Saving to non-volatile memory
         with open(config_file, 'w') as f:
-            json.dump(default_config, f, indent=4)
-        return default_config
+            json.dump(user_config, f, indent=4)
+            
+        print(f"\n[SYSTEM SETUP] Success! Permanent config saved to '{config_file}'.")
+        print("Edge AI System is now transitioning to autonomous operation...\n")
+        time.sleep(2) 
+        
+        return user_config
+
     else:
-        print(f"[SYSTEM] Loading dynamic well parameters from '{config_file}'...")
+        # If memory exists (e.g., after power outage/reboot), load silently
+        print(f"[SYSTEM] Booting up... Loading well memory from '{config_file}'...")
         with open(config_file, 'r') as f:
             return json.load(f)
 
@@ -41,7 +74,7 @@ def load_or_create_config(config_file="well_config.json"):
 class DynacardAnalytics:
     @staticmethod
     def calculate_fluid_pound_severity(position, load):
-        """Simulates the analytical calculation of empty pump volume (%)."""
+        """Simulates calculus-based measurement of empty pump volume (%)."""
         return random.uniform(25.0, 40.0)
 
 class WellMonitor:
@@ -53,7 +86,7 @@ class WellMonitor:
         self.active_alarm = None
 
     def process_new_stroke(self, pred_class, severity=0.0):
-        """Processes stroke classifications via a moving window to prevent alarm fatigue."""
+        """Moving-window evaluation to prevent false positives (alarm fatigue)."""
         self.stroke_history.append((pred_class, severity))
         if len(self.stroke_history) > self.window_size:
             self.stroke_history.pop(0)
@@ -91,10 +124,7 @@ class WellMonitor:
 # PHYSICS & PRESCRIPTIVE CONTROL
 # ==============================================================================
 class SRPPhysicsEngine:
-    """
-    Calculates physical parameters dynamically based on injected config data,
-    proving this is not a static script but a scalable engineering engine.
-    """
+    """Calculates mechanical limits and volumetric targets based on user config."""
     def __init__(self, well_id, plunger_diameter, stroke_length, min_spm):
         self.well_id = well_id
         self.constant = 0.1166
@@ -122,7 +152,7 @@ class MockMLModel:
         self.pound_start_stroke = random.randint(10, 50) 
         
     def predict(self, position, load):
-        """Injects true randomness to simulate unpredictable reservoir behavior."""
+        """Simulates unpredictable reservoir behavior (True Randomness)."""
         self.stroke_count += 1
         if self.stroke_count < self.pound_start_stroke:
             return 'normal'
@@ -187,19 +217,19 @@ def listen_for_operator_override():
 # MAIN ORCHESTRATOR PIPELINE
 # ==============================================================================
 def main():
+    # 1. DYNAMIC CONFIGURATION INJECTION (The "User Input" layer)
+    config = load_or_create_config()
+    
     print("==========================================================")
     print(" SRP AUTONOMOUS CONTROL EDGE-SERVER INITIALIZED")
     print("==========================================================\n")
-    
-    # 1. DYNAMIC CONFIGURATION INJECTION
-    config = load_or_create_config()
     
     WELL_ID = config["well_id"]
     current_spm = config["initial_spm"]
     MAX_SPM_DROP_STEP = config["max_spm_drop_step"]
     COOLDOWN_PERIOD = config["cooldown_period_strokes"]
     
-    # Instantiate modules dynamically based on config
+    # Instantiate modules dynamically based on user config
     monitor = WellMonitor(well_id=WELL_ID, threshold_pct=config["alarm_threshold_pct"])
     physics_engine = SRPPhysicsEngine(
         well_id=WELL_ID, 
@@ -225,13 +255,15 @@ def main():
     print(f"[{WELL_ID}] Pump Specs: {config['pump_diameter_inches']}\" Diameter, {config['stroke_length_inches']}\" Stroke")
     print(f"[{WELL_ID}] MANUAL OVERRIDE ACTIVE: Type 'STOP' and press Enter to kill the motor.\n")
     
+    # Start the background human-in-the-loop listener
     override_thread = threading.Thread(target=listen_for_operator_override, daemon=True)
     override_thread.start()
     
     try:
         # 3. EDGE CONTROL LOOP
-        while is_system_healthy and stroke_counter < 100: 
+        while is_system_healthy and stroke_counter < 150: 
             
+            # Asynchronous Safety Check
             global manual_override_triggered
             if manual_override_triggered:
                 print("\n\n[CONTROL ROOM] MANUAL OVERRIDE COMMAND RECEIVED!")
@@ -254,7 +286,7 @@ def main():
                 if cooldown_strokes_remaining <= 0:
                     print(f"\n\n[SYSTEM] Cooldown complete. Resuming active diagnostic monitoring.")
                     in_cooldown = False
-                time.sleep(0.15)
+                time.sleep(0.1) # Faster pacing during cooldown
                 continue 
                 
             # Diagnostic Stage
@@ -299,13 +331,13 @@ def main():
                         scada.emergency_shutdown()
                         is_system_healthy = False
             
-            time.sleep(0.15) 
+            time.sleep(0.2) 
             
         if is_system_healthy:
             print("\n\n[SYSTEM] Simulation ended naturally.")
 
     except KeyboardInterrupt:
-        print("\n\n[SYSTEM] Interruption received via Keyboard. Shutting down pipeline gracefully.")
+        print("\n\n[SYSTEM] Interruption received. Shutting down pipeline gracefully.")
 
 if __name__ == "__main__":
     main()
