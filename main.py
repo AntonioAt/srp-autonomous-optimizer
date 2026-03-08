@@ -2,11 +2,10 @@ import time
 import random
 import numpy as np
 import sys
-from collections import deque, Counter
+import csv  # Added for data logging
 
 # ==============================================================================
 # MOCK MODULES (For Standalone Testing in Colab/Terminal)
-# In a real production environment, these would be imported from the 'src/' directory.
 # ==============================================================================
 
 class MockDynacardAnalytics:
@@ -19,17 +18,19 @@ class MockWellMonitor:
     def __init__(self, well_id, window_size=10):
         self.well_id = well_id
         self.window_size = window_size
-        self.stroke_history = deque(maxlen=window_size)
+        self.stroke_history = []
         self.active_alarm = None
 
     def process_new_stroke(self, pred_class, severity=0.0):
         self.stroke_history.append((pred_class, severity))
+        if len(self.stroke_history) > self.window_size:
+            self.stroke_history.pop(0)
 
         # Only evaluate once the window is full
         if len(self.stroke_history) == self.window_size:
             classes = [item[0] for item in self.stroke_history]
-            counts = Counter(classes)
-            pound_pct = (counts['fluid_pound'] / self.window_size) * 100.0
+            pound_count = classes.count('fluid_pound')
+            pound_pct = (pound_count / self.window_size) * 100.0
 
             if pound_pct >= 70.0:
                 if self.active_alarm != 'FLUID_POUND':
@@ -78,14 +79,11 @@ class MockMLModel:
     def predict(self, position, load):
         self.stroke_count += 1
         
-        # Real-world dynamic scenario simulation:
-        # Phase 1: Well starts normal
+        # Real-world dynamic scenario simulation
         if self.stroke_count < 15:
             return 'normal'
-        # Phase 2: Inflow drops, fluid pound starts
         elif 15 <= self.stroke_count < 40:
             return 'fluid_pound'
-        # Phase 3: Post-intervention recovery (simulate the well healing)
         else:
             if random.random() < 0.85:
                 return 'normal'
@@ -162,19 +160,33 @@ def main():
     is_system_healthy = True 
     stroke_counter = 0
     
+    # --------------------------------------------------------------------------
+    # INITIALIZE CSV LOG FILE (Write Headers)
+    # --------------------------------------------------------------------------
+    log_filename = 'srp_operation_log.csv'
+    with open(log_filename, mode='w', newline='') as file:
+        writer = csv.writer(file)
+        writer.writerow(['stroke_number', 'current_spm', 'pound_severity_pct'])
+    
     print(f"[{WELL_ID}] Pipeline Active. Current SPM: {current_spm}")
+    print(f"[{WELL_ID}] Logging data to {log_filename}")
     print(f"[{WELL_ID}] Listening to high-frequency telemetry stream...\n")
     
     try:
-        while is_system_healthy and stroke_counter < 80: # Capped at 80 for Colab testing
+        while is_system_healthy and stroke_counter < 80: 
             stroke_counter += 1
             telemetry = generate_mock_telemetry()
             
-            # Control Dynamics: Dead Time Evaluation
+            # 1. Control Dynamics: Dead Time Evaluation
             if in_cooldown:
                 cooldown_strokes_remaining -= 1
                 sys.stdout.write(f"\rStroke {stroke_counter:04d} | [SYSTEM] Cooldown active. Equalizing annulus fluid ({cooldown_strokes_remaining} strokes left)...")
                 sys.stdout.flush()
+                
+                # Log the cooldown state (severity is nominally 0 during stabilization)
+                with open(log_filename, mode='a', newline='') as file:
+                    writer = csv.writer(file)
+                    writer.writerow([stroke_counter, current_spm, 0.0])
                 
                 if cooldown_strokes_remaining <= 0:
                     print(f"\n\n[SYSTEM] Cooldown complete. Resuming active diagnostic monitoring.")
@@ -182,7 +194,7 @@ def main():
                 time.sleep(0.2)
                 continue 
                 
-            # Diagnostic Stage
+            # 2. Diagnostic Stage
             pred_class = ml_model.predict(telemetry['position'], telemetry['load'])
             sys.stdout.write(f"\rStroke {stroke_counter:04d} | ML Class: {pred_class.upper().ljust(15)}")
             sys.stdout.flush()
@@ -191,11 +203,17 @@ def main():
             if pred_class == 'fluid_pound':
                 stroke_severity = MockDynacardAnalytics.calculate_fluid_pound_severity(telemetry['position'], telemetry['load'])
                 
+            # ------------------------------------------------------------------
+            # APPEND DATA TO CSV LOG
+            # ------------------------------------------------------------------
+            with open(log_filename, mode='a', newline='') as file:
+                writer = csv.writer(file)
+                writer.writerow([stroke_counter, current_spm, stroke_severity])
+                
             alarm = monitor.process_new_stroke(pred_class, severity=stroke_severity)
             
-            # Prescriptive Stage & Execution
+            # 3. Prescriptive Stage & Execution
             if alarm:
-                # If the alarm is an INFO (meaning conditions normalized), just print it.
                 if alarm['level'] == 'INFO':
                     print(f"{alarm['message']}")
                 else:
@@ -232,7 +250,7 @@ def main():
                             scada.emergency_shutdown()
                             is_system_healthy = False
             
-            time.sleep(0.2) # Sleep for visual pacing in terminal
+            time.sleep(0.2) 
             
         print("\n\n[SYSTEM] Simulation ended.")
 
